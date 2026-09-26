@@ -5,8 +5,16 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.webkit.SslErrorHandler
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -81,9 +89,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -106,6 +116,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -115,6 +126,8 @@ import com.samielmadani.elmadanistudio.CrashReporter
 import com.samielmadani.elmadanistudio.data.SortMode
 import com.samielmadani.elmadanistudio.data.StoreApp
 import com.samielmadani.elmadanistudio.data.ThemeMode
+import com.samielmadani.elmadanistudio.data.WebsiteCatalog
+import com.samielmadani.elmadanistudio.data.WebsiteEntry
 import com.samielmadani.elmadanistudio.ui.theme.ThemeSettings
 import com.samielmadani.elmadanistudio.ui.theme.LocalLiquidGlass
 import kotlinx.coroutines.launch
@@ -359,11 +372,139 @@ private fun FloatingNavigationButton(label: String, icon: androidx.compose.ui.gr
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun WebsitesPage() {
+    var expandedWebsite by rememberSaveable { mutableStateOf<String?>(null) }
     Scaffold { padding ->
-        Column(Modifier.padding(padding).fillMaxSize().padding(20.dp)) {
-            Text("Websites", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-                EmptyState("No websites added yet", "Add websites you want to keep close at hand.", Icons.Default.Language, null)
+        LazyColumn(
+            modifier = Modifier.padding(padding).fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            contentPadding = PaddingValues(start = 20.dp, top = 20.dp, end = 20.dp, bottom = 112.dp)
+        ) {
+            item {
+                Text("Websites", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            }
+            items(WebsiteCatalog.entries, key = { it.url }) { website ->
+                WebsiteCard(
+                    website = website,
+                    expanded = expandedWebsite == website.url,
+                    onClick = { expandedWebsite = if (expandedWebsite == website.url) null else website.url }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WebsiteCard(website: WebsiteEntry, expanded: Boolean, onClick: () -> Unit) {
+    val glass = LocalLiquidGlass.current
+    var retryCount by remember(website.url) { mutableIntStateOf(0) }
+    var loading by remember(website.url) { mutableStateOf(true) }
+    var loadFailed by remember(website.url) { mutableStateOf(false) }
+
+    Card(
+        shape = RoundedCornerShape(24.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        colors = CardDefaults.cardColors(containerColor = if (glass) MaterialTheme.colorScheme.surface.copy(alpha = 0.64f) else MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)),
+        modifier = Modifier.fillMaxWidth().animateContentSize()
+    ) {
+        Column {
+            Column(
+                modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(website.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                website.description?.let {
+                    Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().height(520.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Color.White)
+                    ) {
+                        if (loadFailed) {
+                            Column(
+                                modifier = Modifier.fillMaxSize().padding(20.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Text("Couldn't load this site", color = MaterialTheme.colorScheme.onSurface)
+                                Spacer(Modifier.height(12.dp))
+                                Button(onClick = {
+                                    loadFailed = false
+                                    loading = true
+                                    retryCount++
+                                }) { Text("Retry") }
+                            }
+                        } else {
+                            key(retryCount) {
+                                AndroidView(
+                                    modifier = Modifier.fillMaxSize(),
+                                    factory = { context ->
+                                        WebView(context).apply {
+                                            settings.javaScriptEnabled = true
+                                            settings.domStorageEnabled = true
+                                            settings.allowFileAccess = false
+                                            settings.allowContentAccess = false
+                                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                                            settings.javaScriptCanOpenWindowsAutomatically = false
+                                            settings.setSupportMultipleWindows(false)
+                                            webViewClient = object : WebViewClient() {
+                                                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                                                    val targetHost = Uri.parse(website.url).host.orEmpty().removePrefix("www.")
+                                                    val requestUri = request.url
+                                                    val requestHost = requestUri.host.orEmpty().removePrefix("www.")
+                                                    return requestUri.scheme != "https" || !requestHost.equals(targetHost, ignoreCase = true)
+                                                }
+
+                                                override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                                                    loading = true
+                                                    loadFailed = false
+                                                }
+
+                                                override fun onPageFinished(view: WebView, url: String?) {
+                                                    loading = false
+                                                }
+
+                                                override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                                                    if (request.isForMainFrame) {
+                                                        loading = false
+                                                        loadFailed = true
+                                                    }
+                                                }
+
+                                                override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+                                                    if (request.isForMainFrame && errorResponse.statusCode >= 400) {
+                                                        loading = false
+                                                        loadFailed = true
+                                                    }
+                                                }
+
+                                                override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: android.net.http.SslError) {
+                                                    handler.cancel()
+                                                    loading = false
+                                                    loadFailed = true
+                                                }
+                                            }
+                                            loadUrl(website.url)
+                                        }
+                                    },
+                                    onRelease = { webView ->
+                                        webView.stopLoading()
+                                        webView.destroy()
+                                    }
+                                )
+                            }
+                            if (loading) {
+                                Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = 0.92f)), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator()
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
