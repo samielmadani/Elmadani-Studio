@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.view.MotionEvent
 import android.webkit.SslErrorHandler
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -443,7 +444,7 @@ private fun WebsiteCard(website: WebsiteEntry, expanded: Boolean, onClick: () ->
                                 AndroidView(
                                     modifier = Modifier.fillMaxSize(),
                                     factory = { context ->
-                                        WebView(context).apply {
+                                        WebsiteWebView(context).apply {
                                             settings.javaScriptEnabled = true
                                             settings.domStorageEnabled = true
                                             settings.allowFileAccess = false
@@ -507,6 +508,29 @@ private fun WebsiteCard(website: WebsiteEntry, expanded: Boolean, onClick: () ->
                 }
             }
         }
+    }
+}
+
+private class WebsiteWebView(context: Context) : WebView(context) {
+    private var previousTouchY = 0f
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                previousTouchY = event.y
+                parent?.requestDisallowInterceptTouchEvent(true)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val fingerMovedDown = event.y > previousTouchY
+                val canScrollInGestureDirection = canScrollVertically(if (fingerMovedDown) -1 else 1)
+                parent?.requestDisallowInterceptTouchEvent(canScrollInGestureDirection)
+                previousTouchY = event.y
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                parent?.requestDisallowInterceptTouchEvent(false)
+            }
+        }
+        return super.onTouchEvent(event)
     }
 }
 
