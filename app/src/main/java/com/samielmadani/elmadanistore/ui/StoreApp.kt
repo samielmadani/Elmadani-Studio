@@ -28,6 +28,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -42,6 +43,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -54,6 +56,8 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -129,6 +133,7 @@ import com.samielmadani.elmadanistudio.data.StoreApp
 import com.samielmadani.elmadanistudio.data.ThemeMode
 import com.samielmadani.elmadanistudio.data.WebsiteCatalog
 import com.samielmadani.elmadanistudio.data.WebsiteEntry
+import com.samielmadani.elmadanistudio.data.WorkflowProgress
 import com.samielmadani.elmadanistudio.ui.theme.ThemeSettings
 import com.samielmadani.elmadanistudio.ui.theme.LocalLiquidGlass
 import kotlinx.coroutines.launch
@@ -143,12 +148,14 @@ fun StoreApp(initialRepo: String? = null, storeViewModel: StoreViewModel = viewM
     val pagerState = rememberPagerState(pageCount = { TopLevelPage.entries.size })
     var selectedPage by remember { mutableIntStateOf(0) }
     var selectedApp by remember { mutableStateOf<StoreApp?>(null) }
+    var fullScreenWebsite by rememberSaveable { mutableStateOf<String?>(null) }
     val apps by storeViewModel.apps.collectAsState()
     val loading by storeViewModel.loading.collectAsState()
     val refreshingRepos by storeViewModel.refreshingRepos.collectAsState()
     val error by storeViewModel.error.collectAsState()
     val progress by storeViewModel.downloadProgress.collectAsState()
     val failedDownloads by storeViewModel.failedDownloads.collectAsState()
+    val workflowProgress by storeViewModel.workflowProgress.collectAsState()
     val updateNotice by storeViewModel.updateNotice.collectAsState()
     val selfUpdate by storeViewModel.selfUpdate.collectAsState()
     val pendingUpdates = storeViewModel.pendingUpdates()
@@ -217,6 +224,7 @@ fun StoreApp(initialRepo: String? = null, storeViewModel: StoreViewModel = viewM
     }
     BackHandler(enabled = selectedApp != null || sortSheetOpen.value || selectedPage != 0 || !onboardingDone) {
         when {
+            fullScreenWebsite != null -> fullScreenWebsite = null
             selectedApp != null -> selectedApp = null
             sortSheetOpen.value -> sortSheetOpen.value = false
             !onboardingDone -> onboardingDone = true
@@ -245,8 +253,10 @@ fun StoreApp(initialRepo: String? = null, storeViewModel: StoreViewModel = viewM
         }
         HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
             when (TopLevelPage.entries[page]) {
-                TopLevelPage.Apps -> HomePage(apps, selfUpdate, loading, refreshingRepos, error, progress, failedDownloads, pendingUpdates, updateNotice != null, storeViewModel, { selectedApp = it }, { sortSheetOpen.value = true }, sortSheetOpen.value, { sortSheetOpen.value = false }, { app -> handleInstall(app) }, { app -> handleInstall(app) }, { handleUpdateAll() })
-                TopLevelPage.Websites -> WebsitesPage()
+                TopLevelPage.Apps -> HomePage(apps, selfUpdate, loading, refreshingRepos, error, progress, failedDownloads, workflowProgress, pendingUpdates, updateNotice != null, storeViewModel, { selectedApp = it }, { sortSheetOpen.value = true }, sortSheetOpen.value, { sortSheetOpen.value = false }, { app -> handleInstall(app) }, { app -> handleInstall(app) }, { handleUpdateAll() })
+                TopLevelPage.Websites -> WebsitesPage(fullScreenWebsite, { website ->
+                    fullScreenWebsite = if (fullScreenWebsite == website) null else website
+                })
                 TopLevelPage.Settings -> SettingsPage(storeViewModel, selfUpdate, { openUnknownSources() })
             }
         }
@@ -372,30 +382,57 @@ private fun FloatingNavigationButton(label: String, icon: androidx.compose.ui.gr
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun WebsitesPage() {
+private fun WebsitesPage(fullScreenWebsite: String?, toggleFullScreen: (String) -> Unit) {
     var expandedWebsite by rememberSaveable { mutableStateOf<String?>(null) }
     Scaffold { padding ->
-        LazyColumn(
-            modifier = Modifier.padding(padding).fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-            contentPadding = PaddingValues(start = 20.dp, top = 20.dp, end = 20.dp, bottom = 112.dp)
-        ) {
-            item {
-                Text("Websites", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        BoxWithConstraints(Modifier.padding(padding).fillMaxSize()) {
+            val listState = rememberLazyListState()
+            val visibleWebsites = if (fullScreenWebsite == null) WebsiteCatalog.entries else WebsiteCatalog.entries.filter { it.url == fullScreenWebsite }
+            val fullHeight = (maxHeight - 250.dp).coerceAtLeast(320.dp)
+
+            LaunchedEffect(fullScreenWebsite) {
+                if (fullScreenWebsite != null) listState.animateScrollToItem(0)
             }
-            items(WebsiteCatalog.entries, key = { it.url }) { website ->
-                WebsiteCard(
-                    website = website,
-                    expanded = expandedWebsite == website.url,
-                    onClick = { expandedWebsite = if (expandedWebsite == website.url) null else website.url }
-                )
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                contentPadding = PaddingValues(start = 20.dp, top = 20.dp, end = 20.dp, bottom = 112.dp)
+            ) {
+                item {
+                    Text("Websites", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                }
+                items(visibleWebsites, key = { it.url }) { website ->
+                    WebsiteCard(
+                        website = website,
+                        expanded = expandedWebsite == website.url,
+                        fullHeight = fullScreenWebsite == website.url,
+                        onClick = {
+                            val collapsing = expandedWebsite == website.url
+                            expandedWebsite = if (collapsing) null else website.url
+                            if (collapsing && fullScreenWebsite == website.url) toggleFullScreen(website.url)
+                        },
+                        onToggleFullHeight = {
+                            if (expandedWebsite != website.url) expandedWebsite = website.url
+                            toggleFullScreen(website.url)
+                        },
+                        webViewHeight = fullHeight
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun WebsiteCard(website: WebsiteEntry, expanded: Boolean, onClick: () -> Unit) {
+private fun WebsiteCard(
+    website: WebsiteEntry,
+    expanded: Boolean,
+    fullHeight: Boolean,
+    onClick: () -> Unit,
+    onToggleFullHeight: () -> Unit,
+    webViewHeight: androidx.compose.ui.unit.Dp
+) {
     val glass = LocalLiquidGlass.current
     var retryCount by remember(website.url) { mutableIntStateOf(0) }
     var loading by remember(website.url) { mutableStateOf(true) }
@@ -409,19 +446,27 @@ private fun WebsiteCard(website: WebsiteEntry, expanded: Boolean, onClick: () ->
         modifier = Modifier.fillMaxWidth().animateContentSize()
     ) {
         Column {
-            Column(
-                modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text(website.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                website.description?.let {
-                    Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(
+                    modifier = Modifier.weight(1f).clickable(onClick = onClick).padding(vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(website.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    website.description?.let {
+                        Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                IconButton(onClick = onToggleFullHeight) {
+                    Icon(
+                        imageVector = if (fullHeight) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                        contentDescription = if (fullHeight) "Exit full height" else "Expand to full height"
+                    )
                 }
             }
             AnimatedVisibility(visible = expanded) {
                 Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) {
                     Box(
-                        modifier = Modifier.fillMaxWidth().height(520.dp)
+                        modifier = Modifier.fillMaxWidth().height(if (fullHeight) webViewHeight else 520.dp)
                             .clip(RoundedCornerShape(16.dp))
                             .background(Color.White)
                     ) {
@@ -544,6 +589,7 @@ private fun HomePage(
     error: String?,
     progress: Map<String, Int>,
     failedDownloads: Set<String>,
+    workflowProgress: Map<String, WorkflowProgress>,
     pendingUpdates: List<StoreApp>,
     updateToastVisible: Boolean,
     vm: StoreViewModel,
@@ -559,7 +605,7 @@ private fun HomePage(
     var search by rememberSaveable { mutableStateOf("") }
     val listApps = buildList {
         addAll(vm.sorted(sort))
-        selfUpdate?.takeIf { it.hasUpdate }?.let { add(it) }
+        selfUpdate?.takeIf { it.hasUpdate || workflowProgress.containsKey("${it.owner}/${it.repo}".lowercase()) }?.let { add(it) }
     }.distinctBy { it.repo }
     val shownApps = listApps.filter { app ->
         val needle = search.trim()
@@ -606,7 +652,7 @@ private fun HomePage(
                         )
                     }
                     items(shownApps, key = { it.repo }) { app ->
-                        AppCard(app, progress[app.repo], failedDownloads.contains(app.repo), app.repo.lowercase() in refreshingRepos, { openDetails(app) }, { install(app) }, { retry(app) })
+                        AppCard(app, progress[app.repo], failedDownloads.contains(app.repo), app.repo.lowercase() in refreshingRepos, workflowProgress["${app.owner}/${app.repo}".lowercase()], { openDetails(app) }, { install(app) }, { retry(app) })
                     }
                 }
             }
@@ -629,16 +675,18 @@ private fun HomePage(
 }
 
 @Composable
-private fun AppCard(app: StoreApp, progress: Int?, failed: Boolean, refreshing: Boolean, openDetails: () -> Unit, install: () -> Unit, retry: () -> Unit) {
+private fun AppCard(app: StoreApp, progress: Int?, failed: Boolean, refreshing: Boolean, publishing: WorkflowProgress?, openDetails: () -> Unit, install: () -> Unit, retry: () -> Unit) {
     val glass = LocalLiquidGlass.current
     val isInstalling = progress != null && progress < 100
     val accentColor = when {
+        publishing != null -> MaterialTheme.colorScheme.tertiary
         isInstalling -> MaterialTheme.colorScheme.tertiary
         app.hasUpdate -> MaterialTheme.colorScheme.error
         app.isInstalled -> MaterialTheme.colorScheme.primary
         else -> MaterialTheme.colorScheme.secondary
     }
     val cardColor = if (glass) MaterialTheme.colorScheme.surface.copy(alpha = 0.64f) else when {
+        publishing != null -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.20f)
         app.hasUpdate -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.20f)
         isInstalling -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.20f)
         app.isInstalled -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.12f)
@@ -670,6 +718,25 @@ private fun AppCard(app: StoreApp, progress: Int?, failed: Boolean, refreshing: 
                     Text(app.description, maxLines = 2, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
                 }
             }
+            if (publishing != null) {
+                Column(Modifier.fillMaxWidth().padding(top = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Publishing update…", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.weight(1f))
+                        publishing.percent?.let { Text("$it%", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold) }
+                    }
+                    if (publishing.percent == null) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.tertiary)
+                    } else {
+                        LinearProgressIndicator(
+                            progress = { publishing.percent.coerceIn(0, 100) / 100f },
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.tertiary,
+                            trackColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.38f)
+                        )
+                    }
+                }
+            }
             Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(app.version, fontWeight = FontWeight.Medium)
@@ -680,7 +747,7 @@ private fun AppCard(app: StoreApp, progress: Int?, failed: Boolean, refreshing: 
                     CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.5.dp)
                     Spacer(Modifier.width(8.dp))
                 }
-                StatusChip(app, isInstalling, failed)
+                if (publishing == null) StatusChip(app, isInstalling, failed)
             }
             Spacer(Modifier.height(6.dp))
             if (isInstalling) {

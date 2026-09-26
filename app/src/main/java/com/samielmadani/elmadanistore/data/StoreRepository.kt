@@ -8,6 +8,7 @@ import android.util.Base64
 import androidx.core.content.FileProvider
 import com.samielmadani.elmadanistudio.R
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -75,6 +76,66 @@ class StoreRepository(private val context: Context) {
             Log.d(TAG, "Refresh finished in ${elapsedMillis(refreshStartedAt)} ms")
         }
     }
+
+    suspend fun loadWorkflowProgress(apps: List<StoreApp>): WorkflowProgressScan = withContext(Dispatchers.IO) {
+        val limit = Semaphore(3)
+        val checks = coroutineScope {
+            apps.distinctBy { workflowRepoKey(it) }.map { app ->
+                async {
+                    limit.withPermit {
+                        val key = workflowRepoKey(app)
+                        try {
+                            WorkflowCheck(key, true, findWorkflowProgress(app))
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Exception) {
+                            Log.w(TAG, "Could not check workflow progress for $key", error)
+                            WorkflowCheck(key, false, null)
+                        }
+                    }
+                }
+            }.awaitAll()
+        }
+        WorkflowProgressScan(
+            checkedRepos = checks.filter { it.checked }.map { it.repoKey }.toSet(),
+            activeRuns = checks.mapNotNull { check -> check.progress?.let { check.repoKey to it } }.toMap()
+        )
+    }
+
+    private fun findWorkflowProgress(app: StoreApp): WorkflowProgress? {
+        val baseUrl = "https://api.github.com/repos/${app.owner}/${app.repo}/actions"
+        val runs = getJson("$baseUrl/runs?status=in_progress&per_page=1", reportHttpError = true)
+            ?: error("GitHub returned no workflow run data")
+        val run = runs.optJSONArray("workflow_runs")?.let { workflowRuns ->
+            (0 until workflowRuns.length()).mapNotNull { workflowRuns.optJSONObject(it) }.firstOrNull()
+        } ?: return null
+        val runId = run.optLong("id").takeIf { it > 0L } ?: error("GitHub returned an invalid workflow run")
+        var page = 1
+        var fetchedJobs = 0
+        var totalJobs = 1
+        val stepStatuses = buildList {
+            while (fetchedJobs < totalJobs) {
+                val jobsResponse = getJson("$baseUrl/runs/$runId/jobs?per_page=100&page=$page", reportHttpError = true)
+                    ?: error("GitHub returned no workflow job data")
+                val jobs = jobsResponse.optJSONArray("jobs") ?: break
+                totalJobs = jobsResponse.optInt("total_count", jobs.length())
+                fetchedJobs += jobs.length()
+                for (jobIndex in 0 until jobs.length()) {
+                    val steps = jobs.optJSONObject(jobIndex)?.optJSONArray("steps") ?: continue
+                    for (stepIndex in 0 until steps.length()) {
+                        add(steps.optJSONObject(stepIndex)?.optString("status").orEmpty())
+                    }
+                }
+                if (jobs.length() == 0) break
+                page++
+            }
+        }
+        return WorkflowProgress(calculateWorkflowPercent(stepStatuses))
+    }
+
+    private fun workflowRepoKey(app: StoreApp) = "${app.owner}/${app.repo}".lowercase()
+
+    private data class WorkflowCheck(val repoKey: String, val checked: Boolean, val progress: WorkflowProgress?)
 
     private suspend fun loadRepoApp(repo: JSONObject, ignored: Set<String>): StoreApp? {
         val owner = repo.optJSONObject("owner")?.optString("login") ?: username
@@ -205,7 +266,7 @@ class StoreRepository(private val context: Context) {
     fun overrideName(repo: String): String? = preferences.getString("name_$repo", null)
     fun saveOverrideName(repo: String, name: String) { preferences.edit().putString("name_$repo", name.trim()).apply() }
 
-    private fun getJson(url: String): JSONObject? = request(url)?.let { runCatching { JSONObject(it) }.getOrNull() }
+    private fun getJson(url: String, reportHttpError: Boolean = false): JSONObject? = request(url, reportHttpError)?.let { runCatching { JSONObject(it) }.getOrNull() }
 
     private fun getJsonArray(url: String, reportHttpError: Boolean = false): JSONArray? = request(url, reportHttpError)?.let { runCatching { JSONArray(it) }.getOrNull() }
 
